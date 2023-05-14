@@ -1,0 +1,482 @@
+---
+title: "Pierini_Mignella_Vestini"
+output: html_document
+date: "2022-12-30"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("rlist")
+library("igraph")
+```
+
+# Loading the data
+
+The first thing to do is load the data contained in the file "hw2_data.RData".
+
+```{r}
+load("hw2_data.RData")
+```
+
+We can now see that the file contained two different list of length 12, one for each group of patients:
+
+- The data of the patients with the Autism Spectrum Disorder, are going to be contained in the  "asd_sel" list.
+
+- The data of the Typically Developed patients, are going to be contained in the "td_sel" list.
+
+In both cases, each element of the lists contains a data frame (145x116): where 116 represent the different ROIs and 145 the number of observations in time.
+
+# Pre-processing
+
+After loading the data we can take a look inside it. 
+
+Here are the first 10 observations in time of the ROI 2001 of the patient caltech_0051472:
+
+```{r, echo=FALSE}
+asd_sel[[1]][[1]][1:10]
+```
+And the ones of the patient trinity_0050234:
+
+```{r, echo=FALSE}
+asd_sel[[2]][[1]][1:10]
+```
+
+We can notice that there is variability in the data.
+
+So to deal with this we decided to standardize on a per-subject + per-ROI basis. To do so, for each subject we will subtract to their time series (all 116 of them) the arithmetic means and divide by the standard deviation, across time.
+
+```{r}
+
+for(i in (1:length(asd_sel))){ # Iterate over the patients
+  paziente <- asd_sel[[i]] # Get the patient data.frame
+  for(j in (1:116)){ # Iterate over the ROIs
+    m <- mean(paziente[[j]]) # Compute the mean 
+    s <- sd(paziente[[j]]) # And the standard deviation
+    paziente[[j]] <- (paziente[[j]]-m)/s # Standardize
+  }
+  asd_sel[[i]] <- paziente # Save the new time series
+}
+
+for(i in (1:length(td_sel))){ # Iterate over the patients
+  paziente <- td_sel[[i]] # Get the patient data.frame
+  for(j in (1:116)){ # Iterate over the ROIs
+    m <- mean(paziente[[j]]) # Compute the mean 
+    s <- sd(paziente[[j]]) # And the standard deviation
+    paziente[[j]] <- (paziente[[j]]-m)/s  # Standardize 
+  }
+  td_sel[[i]] <- paziente # Save the new time series
+}
+```
+
+Let's look at the data after the standardization, again with the first 10 observations in time of the ROI 2001 of the patient caltech_0051472:
+
+```{r, echo=FALSE}
+asd_sel[[1]][[1]][1:10]
+```
+
+And the patient trinity_0050234:
+
+```{r, echo=FALSE}
+asd_sel[[2]][[1]][1:10]
+```
+
+# Pool the data together
+
+We decided to find a representative for each of the groups of patients by using some kind of statistical summary.
+
+So to pool together the data we will use the standard deviation over the patients, since we thought that it could be more relevant to study ROI co-variation in variability rather than average level. So we will consider the same ROI at the same time and compute it's standard deviation across the patients.
+
+
+```{r}
+# Get the names of the ROIs from the data.frame
+names <- names(asd_sel[[1]]) 
+
+# Create two data.frames one for each group. 
+# To build it we will use our chosen statistical summary
+
+ASD <- data.frame() # Create the data.frame
+
+for(j in (1:116)){ # Iterate over the ROIs
+  aux <- c() 
+  for(i in (1:length(asd_sel))){ # Iterate over the patients
+    aux <- c(aux,asd_sel[[i]][[j]]) # Append the ROI of all the patients
+  }
+  aux <- matrix(aux, nrow = 145) 
+  ASD <- rbind(ASD,round(apply(aux, 1, sd), 3)) # Compute the summary over the patients
+}
+
+ASD <- data.frame(t(ASD)) # Save it with the same dimensions of the originals data.frames
+colnames(ASD) <- names # Add the names of the ROIs
+
+
+TD <- data.frame() # Create the data.frame
+
+for(j in (1:116)){ # Iterate over the ROIs
+  aux <- c()
+  for(i in (1:length(td_sel))){ # Iterate over the patients
+    aux <- c(aux,td_sel[[i]][[j]]) # Append the ROI of all the patients
+  }
+  aux <- matrix(aux, nrow = 145)
+  TD <- rbind(TD,round(apply(aux, 1, sd),3)) # Compute the summary over the patients
+}
+
+TD <- data.frame(t(TD)) # Save it with the same dimensions of the originals data.frames
+colnames(TD) <- names # Add the names of the ROIs
+```
+
+The reason why we used the standard deviation is that we would like to give more importance to the differences between the patients in the same group. While the mean gives informations about what happen in the central part of the distribution, the standard deviation does a  better job at giving informations about the data's variability. 
+
+# Threshold
+
+To compute the threshold we will take a quantile of the correlation values found in both groups.
+
+```{r}
+Threshold <- function(asd_sel, td_sel, p){
+  # Find the correlation matrix for all the patients
+  a <- lapply(asd_sel,function(x) cor(x)) # Gives 12 matrices 116x116
+  t <- lapply(td_sel,function(x) cor(x)) # Gives 12 matrices 116x116
+  
+  # Save all correlation values in the vector q
+  q <- c()
+  
+  for(i in a){
+    q <- c(q, abs(i))
+  }
+  for(i in t){
+    q <- c(q, abs(i))
+  }
+  
+  # Compute and return the wanted quantile
+  return(quantile(q, p))
+}
+```
+
+# Find the correlation
+
+We will use two different methods to find the correlation:
+
+- For the first we will directly compute the correlation of the time-series between couples of ROIs.
+
+- For the second we will compute the covariance matrix, of the time-series between couples of ROIs, and later find the matrix of partial correlations.
+
+Here is the function that we will use to do so:
+
+```{r}
+correlation <- function(ASD, TD, partial = F){
+  # If we don't want to find the partial correlation coefficients 
+  # we just compute it with the built in function
+  if(partial == F){
+    rhoA <- cor(ASD)
+    rhoT <- cor(TD)
+  }
+  # If we want to find the partial correlation coefficients 
+  else{
+    Lambda_A <- solve(cov(ASD, ASD)) # Compute the covariance matrix and invert it
+    DIAG <- diag(Lambda_A) %*% t(diag(Lambda_A)) # Get the lambda_jj * lambda_kk
+    rhoA <- -Lambda_A/sqrt(DIAG) # And divide
+    
+    Lambda_T <- solve(cov(TD, TD))
+    DIAG <- diag(Lambda_T) %*% t(diag(Lambda_T))
+    rhoT <- -Lambda_T/sqrt(DIAG)
+  }
+  
+  return(list(rhoA, rhoT)) # Return both the correlation matrices 
+}
+```
+
+
+#  Fisher Z-transform + Bonferroni correction
+
+Now we have to find the 95% asymptotic Confidence Intervals, using the Fisher Z-transform and Bonferroni correction, so we will later be able to build the estimated graphs for each group (G_A and G_T).
+
+We will apply the Z-transform by using the hyperbolic arctangent on the correlation values. On the values that we obtain we will build the confidence intervals, and than we will need to "go back" to the distribution of the correlations by applying the inverse of hyperbolic arctangent (hyperbolic tangent). 
+
+```{r}
+Find_CIs <- function(ASD, TD, alpha, n, D, bonferroni = T, partial = F){
+  
+  # Compute the correlations
+  Rho <- correlation(ASD, TD, partial)
+  rhoA <- Rho[[1]]
+  rhoT <- Rho[[2]]
+  
+  # Apply Z-Transform, that is the same as applying the hyperbolic arctangent (atanh)
+  ZT_A <- atanh(rhoA)
+  ZT_T <- atanh(rhoT)
+  
+  # Bonferroni correction
+  if(bonferroni){
+    alpha <- alpha/choose(D,2)
+  }
+  
+  # Compute the asymptotic CIs + hyperbolic tangent 
+  std <- 1/sqrt(n-3)
+  
+  if(partial){
+    # In case of the 
+    std <- 1/sqrt(n-D-1)
+  }
+  
+  LA <- tanh(ZT_A - qnorm(1 - alpha/2)*std)
+  UA <- tanh(ZT_A + qnorm(1 - alpha/2)*std)
+  
+  LT <- tanh(ZT_T - qnorm(1 - alpha/2)*std)
+  UT <- tanh(ZT_T + qnorm(1 - alpha/2)*std)
+  
+  
+  # Return all the matrices with the lower and upper bounds
+  return(list(LA, UA, LT, UT))
+}
+```
+
+# Graphs
+
+To build our graphs we will compute adjacency matrices. 
+
+Our adjacency matrix will be a 116x116 matrix with boolean values:
+
+- TRUE, if there is a edge between the two ROIs, and that occurs when the intersection between the interval [-threshold, threshold] and the Confidence Interval, related to those ROIs, is empty.
+
+- FALSE, otherwise.
+
+```{r}
+graph <- function(L, U, threshold){
+  # We have the intersection if the Lower bound is over the threshold or the Upper is under -threshold
+  adj <- L>threshold | U<(-threshold)
+  
+  G <- graph_from_adjacency_matrix(
+  adjmatrix = adj,
+  mode = c("undirected"),
+  diag = F
+  )
+  
+  return(G)
+}
+```
+
+Here is an example of the graphs.
+
+This was made:
+
+1. Taking a 0.5 quantile as threshold, resulting in t = 0.18.
+2. Using the Bonferroni correction. 
+
+```{r}
+# Get the Confidence intervals
+CIs <- Find_CIs(ASD, TD, 0.05, 145, 116)
+# Define the threshold
+t <- Threshold(asd_sel, td_sel, 0.5)
+
+# Compute the graphs
+G_A <- graph(CIs[[1]], CIs[[2]], t)
+G_T <- graph(CIs[[3]], CIs[[4]], t)
+```
+
+You can see in green the graph for the ASD patients, in red the TD ones and in blue the graph that show the common connections.
+
+```{r, echo=FALSE}
+par(mfrow=c(1,3))
+plot(G_A,layout=layout_on_sphere, vertex.size=6, edge.color = "black", 
+     vertex.label.dist=1.3, vertex.color="darkgreen", vertex.label.cex=0.5,
+     edge.width = 1.3, lwd=5,vertex.label.color =rgb(0,0,0,0.7), 
+     main="Autism Spectrum Disorder")
+
+plot(G_T,layout=layout_on_sphere, vertex.size=6, edge.color = "black", 
+     vertex.label.dist=1.3, vertex.color="darkred", vertex.label.cex=0.5,
+     edge.width = 1.3, lwd=5,vertex.label.color =rgb(0,0,0,0.7), 
+     main="Typically Developed")
+
+g <- graph.intersection(G_A, G_T, keep.all.vertices = TRUE)
+plot(g,layout=layout_on_sphere, vertex.size=6, edge.color = "black", 
+     vertex.label.dist=1.3, vertex.color="blue", vertex.label.cex=0.5,
+     edge.width = 1.3, lwd=5,vertex.label.color =rgb(0,0,0,0.7), 
+     main="Common connections")
+
+mtext(paste('Graphs based on 95% CIs, with Bonferroni correction. Threshold:', round(t,2)), side=3, outer=TRUE, line=-30)
+```
+
+From the graphs we can see that there are a few more connections in the case of the ASD patients, and that there are only a handfull of common connections. 
+
+# How it changes without Bonferroni
+
+In the previous graph we applied the Bonferroni correction while defining the confidence intervals, here we will see how things change in case the correction is not applied.
+
+We will be using the same data and threshold as before.
+
+```{r}
+# Get the Confidence intervals
+CIs <- Find_CIs(ASD, TD, 0.05, 145, 116, bonferroni = F)
+# Define the threshold
+t <- Threshold(asd_sel, td_sel, 0.5)
+
+# Compute the graphs
+G_A <- graph(CIs[[1]], CIs[[2]], t)
+G_T <- graph(CIs[[3]], CIs[[4]], t)
+```
+
+```{r, echo=FALSE}
+par(mfrow=c(1,3))
+plot(G_A,layout=layout_on_sphere, vertex.size=6, edge.color = "black", 
+     vertex.label.dist=1.3, vertex.color="darkgreen", vertex.label.cex=0.5,
+     edge.width = 1.3, lwd=5,vertex.label.color =rgb(0,0,0,0.7), 
+     main="Autism Spectrum Disorder")
+
+plot(G_T,layout=layout_on_sphere, vertex.size=6, edge.color = "black", 
+     vertex.label.dist=1.3, vertex.color="darkred", vertex.label.cex=0.5,
+     edge.width = 1.3, lwd=5,vertex.label.color =rgb(0,0,0,0.7), 
+     main="Typically Developed")
+
+g <- graph.intersection(G_A, G_T, keep.all.vertices = TRUE)
+plot(g,layout=layout_on_sphere, vertex.size=6, edge.color = "black", 
+     vertex.label.dist=1.3, vertex.color="blue", vertex.label.cex=0.5,
+     edge.width = 1.3, lwd=5,vertex.label.color =rgb(0,0,0,0.7), 
+     main="Common connections")
+
+mtext(paste('Graphs based on 95% CIs, without Bonferroni correction. Threshold:', round(t,2)), side=3, outer=TRUE, line=-30)
+```
+
+We can see that also in this case the number of connections for the ASD patients is higher that the one of the TD ones. 
+
+The biggest difference form the case with the Bonferroni correction is that there are many more edges in all the graphs. This can be explained by the fact that Bonferroni correction guarantees the 95% Confidence Intervals across all the elements. Without it the 95% CI is built for each of the elements, so it has a overall lower confidence level.
+
+To quantify this, we have: 
+
+```{r, echo=FALSE}
+# Get the Confidence intervals
+CIsB <- Find_CIs(ASD, TD, 0.05, 145, 116, bonferroni = T)
+CIs <- Find_CIs(ASD, TD, 0.05, 145, 116, bonferroni = F)
+
+DifB <- CIsB[[2]]-CIsB[[1]]
+Dif <- CIs[[2]]-CIs[[1]]
+
+t <- Threshold(asd_sel, td_sel, 0.5)
+G_AB <- graph(CIsB[[1]], CIsB[[2]], t)
+G_A <- graph(CIs[[1]], CIs[[2]], t)
+
+paste('The increment of the number of edges from the case without Bonferroni to the one with it:', 
+      round(((length(E(G_AB))-length(E(G_A)))/length(E(G_A))) *100,3), '%')
+```
+
+This results are also confirmed if we look at how much the confidence intervals width increases between the two cases:
+
+```{r, echo=FALSE}
+paste('The increment of the confidence intervals width from the case without Bonferroni to the one with it:', 
+      round(mean(replace(((DifB-Dif)/Dif) * 100 , is.na(((DifB-Dif)/Dif) * 100), 0)), 3), '%')
+```
+
+# Changing threshold
+
+Now we want to look at how the results changes by varying the threshold t from small to large values.
+
+To do so we will:
+
+1. Use the Bonferroni correction.
+2. Take different quantilies (0.0, 0.3, 0.6, 0.9) to obtain different thresholds (0, 0.1, 0.22, 0.44).
+
+```{r, echo=FALSE}
+CIs <- Find_CIs(ASD, TD, 0.05, 145, 116)
+
+for(q in seq(from = 0, to = 0.9, length.out = 4)){
+  t <- Threshold(asd_sel, td_sel, q)
+  G_A <- graph(CIs[[1]], CIs[[2]], t)
+  G_T <- graph(CIs[[3]], CIs[[4]], t)
+  par(mfrow=c(1,3))
+  plot(G_A,layout=layout_on_sphere, vertex.size=6, edge.color = "black", 
+       vertex.label.dist=1.3, vertex.color="darkgreen", vertex.label.cex=0.5,
+       edge.width = 1.3, lwd=5,vertex.label.color =rgb(0,0,0,0.7), 
+       main="Autism Spectrum Disorder")
+  
+  plot(G_T,layout=layout_on_sphere, vertex.size=6, edge.color = "black", 
+       vertex.label.dist=1.3, vertex.color="darkred", vertex.label.cex=0.5,
+       edge.width = 1.3, lwd=5,vertex.label.color =rgb(0,0,0,0.7), 
+       main="Typically Developed")
+  
+  g <- graph.intersection(G_A, G_T, keep.all.vertices = TRUE)
+  plot(g,layout=layout_on_sphere, vertex.size=6, edge.color = "black", 
+       vertex.label.dist=1.3, vertex.color="blue", vertex.label.cex=0.5,
+       edge.width = 1.3, lwd=5,vertex.label.color =rgb(0,0,0,0.7), 
+       main="Common connections")
+  mtext(paste('Graphs based on 95% CIs, with Bonferroni correction. Threshold:', round(t,2)), side=3, outer=TRUE, line=-30)
+}
+```
+
+As expected if we increase the threshold we always get less edges. 
+
+The previous pattern of the ASD group having more connections is still present, in particular we can see the last edge "to die" is in the ASD group and it's the edge:
+
+```{r, echo=FALSE}
+E(G_A)
+```
+
+Trying to find the "last connection to die" for the TD patients, we found that we can obtain it for the threshold 0.43 (0.89 quantile). In particular last ROIs connection is:
+
+```{r, echo=FALSE}
+  t <- Threshold(asd_sel, td_sel, 0.89)
+  G_T <- graph(CIs[[3]], CIs[[4]], t)
+  E(G_T)
+```
+
+# Partial correlation coefficients
+
+Now we want to look at the results using the partial correlation coefficients, so we will change the threshold t from small to large values, just  like we did before.
+
+So we will:
+
+1. Use the Bonferroni correction.
+2. Take different quantilies (0, 0.23, 0.47, 0.7) to obtain different thresholds (0, 0.08, 0.16, 0.28).
+
+```{r, echo=FALSE}
+CIs <- Find_CIs(ASD, TD, 0.05, 145, 116, partial = T)
+
+for(q in seq(from = 0, to = 0.7, length.out = 4)){
+  t <- Threshold(asd_sel, td_sel, q)
+  G_A <- graph(CIs[[1]], CIs[[2]], t)
+  G_T <- graph(CIs[[3]], CIs[[4]], t)
+  par(mfrow=c(1,3))
+  plot(G_A,layout=layout_on_sphere, vertex.size=6, edge.color = "black", 
+       vertex.label.dist=1.3, vertex.color="darkgreen", vertex.label.cex=0.5,
+       edge.width = 1.3, lwd=5,vertex.label.color =rgb(0,0,0,0.7), 
+       main="Autism Spectrum Disorder")
+  
+  plot(G_T,layout=layout_on_sphere, vertex.size=6, edge.color = "black", 
+       vertex.label.dist=1.3, vertex.color="darkred", vertex.label.cex=0.5,
+       edge.width = 1.3, lwd=5,vertex.label.color =rgb(0,0,0,0.7), 
+       main="Typically Developed")
+  
+  g <- graph.intersection(G_A, G_T, keep.all.vertices = TRUE)
+  plot(g,layout=layout_on_sphere, vertex.size=6, edge.color = "black", 
+       vertex.label.dist=1.3, vertex.color="blue", vertex.label.cex=0.5,
+       edge.width = 1.3, lwd=5,vertex.label.color =rgb(0,0,0,0.7), 
+       main="Common connections")
+  mtext(paste('Graphs based on 95% CIs, with Bonferroni correction. Threshold:', round(t,2)), side=3, outer=TRUE, line=-30)
+}
+```
+
+Again as expected if we increase the threshold we always get less edges. 
+
+The previous pattern of the ASD group having more connections is still present, even with a different method to compute the correlation, and in particular, we can see the last edge "to die" is in the ASD group and it's the edge:
+
+```{r, echo=FALSE}
+E(G_A)
+```
+
+Trying to find the "last connection to die" for the TD patients, as we can see from the third image, we found that we can obtain it for the threshold 0.16 (0.47 quantile). In particular last ROIs connection is:
+
+```{r, echo=FALSE}
+  t <- Threshold(asd_sel, td_sel, 0.47)
+  G_T <- graph(CIs[[3]], CIs[[4]], t)
+  E(G_T)
+```
+
+The main differences that we can notice between the two methods is that:
+
+1. Using the method of the partial correlations we obtain less connections between the ROIs.
+
+2. The connection that we get, with this method, seems to be weaker, so they "die" with lower thresholds.
+
+3. We seems to not obtain any common edges, with the second method. 
+
+The first and second points can be explained by the fact that, the asymptotic distribution of partial correlation coefficients has a higher variance, it's 0.19 = 1/n-g-3, with g = D-2, while it was 0.08 with the previous method, the higher variance gives us back wider Confidence Intervals.
+
+The third point, makes us think that, for the goal of our analysis, the first method is the most efficient. The reason for that is: we are trying to find not only differences, but also common things between the two groups.
+
+
